@@ -1,0 +1,53 @@
+{
+  "n_transacoes": 50250,
+  "proporcao_fraude_original": 0.015064676616915422,
+  "estrategia_balanceamento": "smote",
+  "melhor_modelo": "LightGBM",
+  "metricas_todos_modelos": {
+    "Regressao_Logistica": {
+      "precisao": 0.2647058823529412,
+      "recall": 0.9144385026737968,
+      "f1_score": 0.4105642256902761,
+      "roc_auc": 0.9790361128688386,
+      "pr_auc": 0.8316317029587601
+    },
+    "Random_Forest": {
+      "precisao": 0.6327433628318584,
+      "recall": 0.7647058823529411,
+      "f1_score": 0.6924939467312349,
+      "roc_auc": 0.9827824250791847,
+      "pr_auc": 0.801221217673581
+    },
+    "XGBoost": {
+      "precisao": 0.7164179104477612,
+      "recall": 0.7700534759358288,
+      "f1_score": 0.7422680412371134,
+      "roc_auc": 0.9792111376567785,
+      "pr_auc": 0.831768457094668
+    },
+    "LightGBM": {
+      "precisao": 0.7877094972067039,
+      "recall": 0.7540106951871658,
+      "f1_score": 0.7704918032786885,
+      "roc_auc": 0.9776107248936062,
+      "pr_auc": 0.8371156633041945
+    },
+    "CatBoost": {
+      "precisao": 0.6550218340611353,
+      "recall": 0.8021390374331551,
+      "f1_score": 0.7211538461538461,
+      "roc_auc": 0.9760811037940422,
+      "pr_auc": 0.8222265416143604
+    },
+    "Isolation_Forest": {
+      "precisao": 0.4521276595744681,
+      "recall": 0.45454545454545453,
+      "f1_score": 0.4533333333333333
+    },
+    "One_Class_SVM": {
+      "precisao": 0.30952380952380953,
+      "recall": 0.34759358288770054,
+      "f1_score": 0.327455919395466
+    }
+  }
+}
