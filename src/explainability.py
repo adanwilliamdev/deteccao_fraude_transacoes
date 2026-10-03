@@ -1,79 +1,64 @@
 """
 explainability.py
 ------------------
-Etapa 03 do roadmap: Explicabilidade do Modelo (XAI).
+Explicabilidade (XAI) do modelo.
 
-Usa SHAP (SHapley Additive exPlanations) para tornar as decisões do
-melhor modelo auditáveis e transparentes:
-
-- Importância global das variáveis (summary plot).
-- Explicação individual de uma transação específica (force/waterfall plot),
-  fundamental para a equipe de negócio entender "por que esta transação
-  específica foi marcada como fraude".
+- Com ``shap`` instalado: importância global (summary) e explicação local
+  (waterfall) — como na v1, agora aplicadas ao modelo final do Pipeline.
+- SEM ``shap``: fallback 100% scikit-learn, sem perder a funcionalidade:
+    * importância global por permutação (queda de PR-AUC ao embaralhar a feature);
+    * explicação local por oclusão (quanto o risco, em log-odds, cai ao
+      substituir cada feature por seu valor típico) — útil para o analista entender um alerta.
 """
 
 from __future__ import annotations
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import shap
+from sklearn.inspection import permutation_importance
+
+from .models import optional_import
 
 
-def compute_shap_values(model, X_background: pd.DataFrame, X_explain: pd.DataFrame | None = None):
-    """Calcula os valores SHAP para o modelo treinado.
+def has_shap() -> bool:
+    return optional_import("shap") is not None
 
-    Usa shap.Explainer, que seleciona automaticamente o algoritmo mais
-    eficiente disponível (TreeExplainer para modelos baseados em árvore,
-    fallback para KernelExplainer/PermutationExplainer em outros casos).
-    """
-    if X_explain is None:
-        X_explain = X_background
 
-    # Amostragem para manter o cálculo rápido em datasets grandes.
-    background_sample = X_background.sample(
-        n=min(200, len(X_background)), random_state=42
-    )
-    explain_sample = X_explain.sample(
-        n=min(500, len(X_explain)), random_state=42
-    )
+def split_pipeline(pipe):
+    """Devolve (pré-processador, modelo final) de um Pipeline prep -> clf."""
+    prep = pipe.named_steps["prep"]
+    clf = pipe.named_steps["clf"]
+    return prep, getattr(clf, "estimator_", clf)
 
+
+# --------------------------------------------------------------------------- #
+# SHAP (opcional)
+# --------------------------------------------------------------------------- #
+def compute_shap_values(pipe, X_background: pd.DataFrame, X_explain: pd.DataFrame, n_background=200, n_explain=500):
+    shap = optional_import("shap")
+    if shap is None:
+        raise ImportError("shap não instalado")
+    prep, model = split_pipeline(pipe)
+    bg = prep.transform(X_background.sample(n=min(n_background, len(X_background)), random_state=42))
+    ex = prep.transform(X_explain.sample(n=min(n_explain, len(X_explain)), random_state=42))
     try:
-        explainer = shap.Explainer(model, background_sample)
-        shap_values = explainer(explain_sample)
+        values = shap.Explainer(model, bg)(ex)
     except Exception:
-        # Fallback genérico e mais lento, mas funciona para qualquer modelo
-        # com predict_proba.
-        explainer = shap.KernelExplainer(
-            lambda data: model.predict_proba(data)[:, 1], background_sample
-        )
-        raw_values = explainer.shap_values(explain_sample, nsamples=100)
-        shap_values = shap.Explanation(
-            values=raw_values,
-            base_values=np.full(len(explain_sample), explainer.expected_value),
-            data=explain_sample.values,
-            feature_names=list(explain_sample.columns),
-        )
-
-    shap_values = _select_positive_class(shap_values)
-    return shap_values, explain_sample
-
-
-def _select_positive_class(shap_values):
-    """Alguns modelos (ex: RandomForestClassifier) retornam valores SHAP com
-    uma dimensão extra para cada classe: shape (n_amostras, n_features, n_classes).
-    Para classificação binária, sempre selecionamos a classe positiva (fraude,
-    índice 1) para manter a interface consistente entre todos os modelos.
-    """
-    values = getattr(shap_values, "values", None)
-    if values is not None and values.ndim == 3:
-        return shap_values[:, :, 1]
-    return shap_values
+        explainer = shap.KernelExplainer(lambda d: model.predict_proba(pd.DataFrame(d, columns=ex.columns))[:, 1], bg)
+        raw = explainer.shap_values(ex, nsamples=100)
+        values = shap.Explanation(values=raw, base_values=np.full(len(ex), explainer.expected_value),
+                                  data=ex.values, feature_names=list(ex.columns))
+    if getattr(values, "values", None) is not None and values.values.ndim == 3:
+        values = values[:, :, 1]
+    return values, ex
 
 
 def plot_shap_summary(shap_values, output_path: str) -> None:
-    """Gráfico de importância global das variáveis (quais features mais
-    influenciam, em média, a decisão do modelo)."""
+    shap = optional_import("shap")
     plt.figure(figsize=(9, 6))
     shap.summary_plot(shap_values, show=False)
     plt.tight_layout()
@@ -82,9 +67,7 @@ def plot_shap_summary(shap_values, output_path: str) -> None:
 
 
 def plot_shap_waterfall(shap_values, index: int, output_path: str) -> None:
-    """Explica UMA transação específica: mostra quais variáveis empurraram
-    a previsão para 'fraude' ou para 'legítima', e o quanto cada uma pesou.
-    """
+    shap = optional_import("shap")
     plt.figure(figsize=(9, 6))
     shap.plots.waterfall(shap_values[index], show=False)
     plt.tight_layout()
@@ -93,14 +76,77 @@ def plot_shap_waterfall(shap_values, index: int, output_path: str) -> None:
 
 
 def top_features_for_transaction(shap_values, index: int, top_n: int = 5) -> pd.DataFrame:
-    """Retorna, em formato tabular, as variáveis que mais contribuíram
-    (positiva ou negativamente) para a classificação de uma transação
-    específica -- útil para gerar um relatório textual automático para a
-    equipe de negócio (ex: 'Esta transação foi marcada como fraude
-    principalmente por causa de X e Y').
-    """
-    values = shap_values[index].values
-    features = shap_values[index].feature_names
-    df = pd.DataFrame({"feature": features, "shap_value": values})
-    df["abs_shap"] = df["shap_value"].abs()
-    return df.sort_values("abs_shap", ascending=False).head(top_n).drop(columns="abs_shap")
+    df = pd.DataFrame({"feature": shap_values[index].feature_names, "shap_value": shap_values[index].values})
+    return df.reindex(df["shap_value"].abs().sort_values(ascending=False).index).head(top_n).reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------- #
+# Fallback sem SHAP
+# --------------------------------------------------------------------------- #
+def global_importance(pipe, X: pd.DataFrame, y, n_repeats: int = 3, max_rows: int = 6000, random_state: int = 42) -> pd.DataFrame:
+    """Importância por permutação (queda de PR-AUC), model-agnostic."""
+    rng = np.random.default_rng(random_state)
+    y = np.asarray(y)
+    pos, neg = np.where(y == 1)[0], np.where(y == 0)[0]
+    n_neg = max(0, max_rows - len(pos))
+    idx = np.sort(np.concatenate([pos, rng.choice(neg, min(n_neg, len(neg)), replace=False)]))
+    r = permutation_importance(pipe, X.iloc[idx], y[idx], scoring="average_precision",
+                               n_repeats=n_repeats, random_state=random_state, n_jobs=1)
+    return (pd.DataFrame({"feature": X.columns, "queda_pr_auc": r.importances_mean, "desvio": r.importances_std})
+            .sort_values("queda_pr_auc", ascending=False).reset_index(drop=True))
+
+
+def _log_odds(pipe, X: pd.DataFrame) -> float:
+    """Log-odds de fraude. Usa decision_function (exato, não satura) quando o modelo
+    final tem; senão, logit da probabilidade com recorte mínimo."""
+    try:
+        prep, est = split_pipeline(pipe)
+        if hasattr(est, "decision_function"):
+            return float(np.ravel(est.decision_function(prep.transform(X)))[0])
+    except Exception:
+        pass
+    p = float(np.clip(pipe.predict_proba(X)[:, 1][0], 1e-12, 1 - 1e-12))
+    return float(np.log(p / (1 - p)))
+
+
+def local_explanation(pipe, X_row: pd.DataFrame, X_reference: pd.DataFrame, top_n: int = 6) -> pd.DataFrame:
+    """Oclusão: para cada feature, troca pelo valor típico (mediana/moda da
+    referência) e mede a variação do RISCO. O efeito é medido em log-odds
+    (não em probabilidade) porque probabilidades saturadas em ~1,0 escondem o
+    peso das variáveis. ``efeito_logit`` > 0 = a feature EMPURRA para 'fraude'."""
+    base_p = float(pipe.predict_proba(X_row)[:, 1][0])
+    base_lo = _log_odds(pipe, X_row)
+    rows = []
+    for c in X_row.columns:
+        alt = X_row.copy()
+        ref = X_reference[c]
+        alt[c] = ref.median() if pd.api.types.is_numeric_dtype(ref) else ref.mode().iloc[0]
+        rows.append({"feature": c, "valor": X_row[c].iloc[0], "valor_tipico": alt[c].iloc[0],
+                     "efeito_logit": base_lo - _log_odds(pipe, alt)})
+    df = pd.DataFrame(rows)
+    df = df.reindex(df["efeito_logit"].abs().sort_values(ascending=False).index).head(top_n).reset_index(drop=True)
+    df.attrs["prob_base"] = base_p
+    return df
+
+
+def plot_importance(df: pd.DataFrame, output_path: str, col: str = "queda_pr_auc", top_n: int = 15,
+                    title: str = "Importância global (permutação)") -> None:
+    d = df.head(top_n).iloc[::-1]
+    fig, ax = plt.subplots(figsize=(8, 5.5))
+    ax.barh(d["feature"], d[col], xerr=d["desvio"] if "desvio" in d else None, color="#3b6ea5")
+    ax.set(xlabel="Queda média do PR-AUC ao embaralhar a feature", title=title)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=120)
+    plt.close(fig)
+
+
+def plot_local_explanation(df: pd.DataFrame, output_path: str, title: str = "Por que esta transação foi sinalizada?") -> None:
+    d = df.iloc[::-1]
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.barh(d["feature"], d["efeito_logit"], color=np.where(d["efeito_logit"] > 0, "#c0392b", "#2e86c1"))
+    ax.axvline(0, c="k", lw=0.8)
+    ax.set(xlabel="Efeito no log-odds de fraude (vermelho = aumenta o risco)",
+           title=f"{title}  (prob. = {df.attrs.get('prob_base', float('nan')):.2f})")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=120)
+    plt.close(fig)

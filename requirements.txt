@@ -1,11 +1,15 @@
+# Núcleo
 numpy>=1.26
 pandas>=2.0
 scikit-learn>=1.4
+scipy>=1.11
 matplotlib>=3.8
 seaborn>=0.13
-imbalanced-learn>=0.12
+joblib>=1.3
+pyyaml>=6.0
+# Opcionais — se ausentes, o pipeline os ignora com um aviso (ver requirements-core.txt)
+imbalanced-learn>=0.12   # ADASYN
 xgboost>=2.0
 lightgbm>=4.0
 catboost>=1.2
-shap>=0.45
-joblib>=1.3
+shap>=0.45               # explicabilidade SHAP (senão: permutação + oclusão)

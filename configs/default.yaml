@@ -1,0 +1,11 @@
+# Configuração padrão. Qualquer chave pode ser sobrescrita pela CLI.
+n_samples: 60000
+fraud_ratio: 0.015
+split: temporal              # temporal | stratified
+balance_strategy: class_weight   # class_weight | smote | adasyn | undersample | none
+threshold_strategy: cost     # cost | f1 | f2 | recall | default
+review_cost: 5.0             # custo de analisar 1 alerta
+fn_factor: 1.0               # fração do valor da fraude perdida considerada prejuízo
+ensemble_top_k: 3
+with_anomaly: true
+n_bootstrap: 300

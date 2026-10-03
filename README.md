@@ -1,159 +1,153 @@
-# Detecção de Anomalias em Transações (Detecção de Fraude)
+# Detecção de Fraude em Transações — v2
 
-Pipeline completo de Machine Learning para identificar transações
-financeiras suspeitas, seguindo o roadmap clássico usado no mercado:
+Pipeline de Machine Learning de ponta a ponta para identificar transações
+fraudulentas: EDA → features sem vazamento → split temporal → modelos e
+ensemble → limiar por custo de negócio → intervalos de confiança → drift →
+explicabilidade → modelo empacotado, CLI e API.
 
-1. **Primeiros passos**: EDA + Feature Engineering
-2. **Balanceamento e avaliação**: SMOTE/ADASYN/Undersampling + métricas corretas
-3. **Modelos avançados e explicabilidade**: Ensembles + Isolation Forest/One-Class SVM + SHAP + Cross-Validation
-
-O projeto já roda **de ponta a ponta** com um dataset sintético gerado
-automaticamente (mesma estrutura do dataset clássico de fraude em cartão
-de crédito). Para usar seus **dados reais**, basta apontar para o seu CSV.
-
-## Estrutura do projeto
-
-```
-fraud_detection/
-├── main.py                      # Orquestra o pipeline inteiro
-├── requirements.txt
-├── notebook_colab.ipynb         # Versão em notebook (Google Colab)
-├── src/
-│   ├── data_gen.py              # Geração/carregamento do dataset
-│   ├── eda.py                   # Análise Exploratória dos Dados
-│   ├── feature_engineering.py   # Criação de variáveis + normalização
-│   ├── balancing.py             # SMOTE / ADASYN / Undersampling
-│   ├── models.py                # Regressão Logística, RF, XGBoost,
-│   │                             #  LightGBM, CatBoost, Isolation Forest,
-│   │                             #  One-Class SVM
-│   ├── evaluation.py            # Recall, Precisão, F1, PR-AUC, ROC-AUC,
-│   │                             #  Stratified K-Fold
-│   └── explainability.py        # SHAP (importância global + individual)
-└── outputs/                     # Gerado a cada execução
-    ├── eda/                     # Gráficos e tabelas da EDA
-    ├── modelos/                 # Matrizes de confusão, curvas PR/ROC,
-    │                             #  modelo treinado (.joblib)
-    └── relatorios/               # Comparação de modelos, SHAP, JSON final
-```
-
-## Instalação
+Funciona **imediatamente** com um dataset sintético (cartões, canal, categoria,
+distância, fraudes em rajada) e aceita o seu CSV real (coluna `Class`).
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt        # ou requirements-core.txt (só scikit-learn)
+python main.py                         # tudo, com dados sintéticos
+python main.py --csv creditcard.csv    # dados reais (Kaggle: Time, V1..V28, Amount, Class)
+make test                              # 21 testes
 ```
 
-## Como executar
+## O que mudou em relação à v1 (e por quê)
 
-### Com dados sintéticos (funciona imediatamente, sem nenhum arquivo)
+A v1 já tinha o roteiro certo, mas alguns detalhes metodológicos **inflavam as
+métricas**. A v2 corrige isso e acrescenta o que falta para uso real
+(detalhes no [CHANGELOG](CHANGELOG.md)):
 
+| Tema | v1 | v2 |
+|---|---|---|
+| Scaler / imputação | ajustados no dataset inteiro (vazamento) | ajustados só no treino, dentro do Pipeline |
+| SMOTE + CV | SMOTE antes da CV (sintéticos na validação) | reamostragem **dentro** do estimador, só no `fit` |
+| Escolha do modelo | pelo PR-AUC do **teste** | pela **validação**; o teste só reporta |
+| Split | aleatório estratificado | **temporal** (passado → futuro); estratificado opcional |
+| Features | hora, gap global, rolling por linha | **por cartão**: velocidade 1h/24h, valor vs. média do cartão, categoria nova, hora cíclica (causais) |
+| Decisão | limiar fixo 0,5 | limiar por **custo esperado**, F1, F2 ou recall-alvo |
+| Incerteza | métrica pontual | **IC95%** por bootstrap + CV temporal |
+| Métricas | precisão, recall, F1, AUCs | + MCC, FPR, Brier, precisão/recall no top-1%, economia em R$ |
+| Modelos | 5 + 2 anomalias (libs obrigatórias) | + Extra Trees, HistGB, **ensemble**; XGB/LGBM/CatBoost/SHAP opcionais |
+| Produção | `.joblib` + scaler soltos | 1 arquivo (pipeline+limiar+features), `predict.py`, `api.py`, PSI de drift |
+
+## Estrutura
+
+```
+├── main.py                 # orquestra o pipeline (função run(cfg) reutilizável)
+├── predict.py              # CLI: pontua transações novas
+├── api.py                  # serviço FastAPI (opcional)
+├── configs/default.yaml    # configuração
+├── notebook_colab.ipynb    # passo a passo interativo
+├── tests/test_fraude.py    # 21 testes (vazamento, custo, SMOTE, PSI, e2e...)
+└── src/
+    ├── data_gen.py            # dataset sintético / carregamento de CSV
+    ├── eda.py                 # estatísticas, qualidade, gráficos (hora, canal, categoria)
+    ├── splits.py              # validação de esquema + split temporal/estratificado
+    ├── feature_engineering.py # features causais + TabularPreprocessor
+    ├── balancing.py           # SMOTE (próprio), ADASYN, undersampling, ResampledClassifier
+    ├── models.py              # modelos, ensemble, detectores de anomalia
+    ├── evaluation.py          # métricas, limiares, custo, bootstrap, CV, gráficos
+    ├── explainability.py      # SHAP (opcional) / permutação + oclusão
+    ├── drift.py               # PSI
+    ├── inference.py           # FraudDetector (modelo empacotado)
+    └── config.py
+```
+
+## Como o pipeline decide
+
+```
+dados → limpeza → features causais → [ treino | validação | teste ]  (ordem temporal)
+         │
+         ├─ treino    : ajusta pré-processamento, reamostragem e modelos
+         ├─ validação : escolhe modelo, pesos do ensemble e LIMIAR
+         └─ teste     : só reporta (nenhuma decisão olha para ele)
+```
+
+- **Features causais**: cada linha usa apenas transações *anteriores* do mesmo
+  cartão (teste automatizado garante que remover o futuro não altera nada).
+  Sem `id_cartao` (ex.: dataset do Kaggle) cai para features globais.
+- **Custo de negócio**: `custo = review_cost × nº de alertas + fn_factor × valor das fraudes perdidas`.
+  O limiar `cost` minimiza isso. Ajuste `review_cost` e `fn_factor` à sua realidade.
+- **Ensemble**: média das probabilidades dos top-k modelos, ponderada pelo PR-AUC de validação.
+- **Anomalias**: Isolation Forest/One-Class SVM treinados só com legítimas, avaliados por score.
+
+## Resultados de exemplo (dados sintéticos, 60k transações, 1,5% fraude)
+
+Teste temporal: 15.000 transações, 230 fraudes. Limiar `cost` escolhido na validação, `review_cost = 5`.
+
+| Modelo | PR-AUC (IC95%) | Precisão | Recall | Economia vs. sem modelo |
+|---|---|---|---|---|
+| Ensemble_top3 *(escolhido pela validação)* | 0,855 (0,811–0,891) | 0,644 | 0,835 | 88,2% |
+| Regressão Logística | 0,851 (0,808–0,891) | 0,676 | 0,817 | 90,1% |
+| HistGradientBoosting | 0,844 (0,798–0,880) | 0,478 | 0,843 | 87,1% |
+| Random Forest | 0,835 (0,792–0,875) | 0,490 | 0,839 | 87,5% |
+| Extra Trees | 0,826 (0,776–0,866) | 0,597 | 0,826 | 87,9% |
+| One-Class SVM | 0,648 (0,583–0,707) | 0,272 | 0,809 | 81,1% |
+| Isolation Forest | 0,600 (0,540–0,654) | 0,294 | 0,765 | 84,1% |
+
+**Leitura honesta:** os ICs dos cinco primeiros se sobrepõem — não há vencedor
+estatístico entre eles. O dataset sintético foi desenhado para ter sinal claro
+(distância e velocidade); serve para validar o pipeline, **não** para prever
+desempenho em produção. Observações que valem para dados reais também:
+
+- **Balanceamento** (`--benchmark_balancing`): `none`, `class_weight`, `smote` e
+  `undersample` ficaram dentro de ~1,5 p.p. de PR-AUC, mas as probabilidades
+  pioram muito com reamostragem/pesos (Brier 0,004 → ~0,043). Se você usa a
+  probabilidade em si (não só o ranking), calibre ou prefira `none` + limiar.
+- **Limiar**: a estratégia escolhida muda muito o perfil de alertas, com o mesmo modelo
+  (ex.: F1 → 184 alertas, precisão 0,92 e recall 0,74; custo → 298 alertas, precisão 0,64 e recall 0,84).
+- Todos os artefatos desta execução estão em `outputs/` (incluindo `relatorios/relatorio.md`).
+
+## Uso
+
+### Treinar
 ```bash
-python main.py
+python main.py --balance_strategy smote --benchmark_balancing
+python main.py --threshold_strategy f2 --review_cost 12 --fn_factor 0.8
+python main.py --models LightGBM Random_Forest --split stratified
+python main.py --config configs/default.yaml --output_dir runs/exp1
 ```
+A CLI sobrescreve o YAML. Todas as opções: `python main.py -h`.
 
-Parâmetros opcionais:
-
+### Pontuar transações novas
 ```bash
-python main.py --n_samples 50000 --fraud_ratio 0.015 --balance_strategy smote
+python predict.py --model outputs/modelos/modelo_fraude.joblib \
+                  --input novas.csv --history historico_recente.csv --output pontuadas.csv
 ```
-
-### Com o seu dataset real
-
-O CSV precisa ter uma coluna chamada `Class` (0 = legítima, 1 = fraude) e,
-idealmente, colunas `Time` e `Amount` (como no dataset clássico do Kaggle
-"Credit Card Fraud Detection"). Qualquer coluna numérica extra é aproveitada
-automaticamente pelo pipeline.
-
-```bash
-python main.py --csv caminho/para/seu_dataset.csv
-```
-
-### Estratégias de balanceamento disponíveis
-
-| Estratégia     | Tipo           | Quando usar |
-|----------------|----------------|-------------|
-| `smote`        | Oversampling   | Padrão. Bom equilíbrio geral. |
-| `adasyn`       | Oversampling   | Quando a fronteira entre classes é mais complexa. |
-| `undersample`  | Undersampling  | Quando a base é muito grande e você quer treinar mais rápido. |
-| `none`         | Nenhum         | Baseline para comparação. |
-
-```bash
-python main.py --balance_strategy adasyn
-```
-
-## O que o pipeline faz, passo a passo
-
-### 1. EDA (`src/eda.py`)
-- Estatísticas descritivas (média, mediana, desvio padrão).
-- Detecção de nulos, duplicados e outliers (método IQR).
-- Limpeza automática (remove duplicados, imputa nulos pela mediana).
-- Gráficos: balanço de classes, distribuição do valor por classe,
-  matriz de correlação.
-
-### 2. Feature Engineering (`src/feature_engineering.py`)
-- `hora_do_dia` e `periodo_dia` (madrugada/manhã/tarde/noite) a partir do
-  tempo da transação.
-- `gap_tempo_transacao_anterior`: intervalo entre transações consecutivas.
-- `log_amount` e `amount_zscore_global`: tratamento da assimetria do valor.
-- `media_movel_valor` e `contagem_movel_transacoes`: proxy de frequência
-  de uso do cartão (janela deslizante).
-- Padronização via `RobustScaler` (mais resistente a outliers que o
-  `StandardScaler` — importante porque outliers em fraude costumam ser
-  o próprio sinal que queremos capturar, não erro de medição).
-
-### 3. Balanceamento (`src/balancing.py`)
-- SMOTE, ADASYN e Random Under Sampler, aplicados **somente no conjunto de
-  treino** (nunca no teste, para não inflar artificialmente as métricas).
-
-### 4. Modelos (`src/models.py`)
-- Baseline: Regressão Logística (`class_weight="balanced"`).
-- Ensembles: Random Forest, XGBoost, LightGBM, CatBoost (todos com peso de
-  classe ajustado via `scale_pos_weight`).
-- Não supervisionados: Isolation Forest e One-Class SVM (detectam anomalia
-  sem usar o rótulo durante o treino).
-
-### 5. Avaliação (`src/evaluation.py`)
-- **Nunca usa acurácia pura** como critério de decisão.
-- Métricas: Precisão, Recall, F1-Score, PR-AUC, ROC-AUC.
-- Validação cruzada estratificada (`StratifiedKFold`) do melhor modelo.
-- Gráficos: matriz de confusão, curvas Precision-Recall e ROC, comparação
-  entre todos os modelos.
-
-### 6. Explicabilidade (`src/explainability.py`)
-- SHAP: importância global das variáveis (quais pesam mais, em média).
-- SHAP waterfall: explica **uma transação específica** — essencial para a
-  equipe de negócio auditar por que aquela transação foi marcada como
-  suspeita.
-
-## Saídas geradas (pasta `outputs/`)
-
-- `eda/estatisticas_descritivas.csv`, `eda/balanceamento_classes.csv`
-- `eda/01_balanco_classes.png`, `02_distribuicao_valor.png`, `03_correlacao.png`
-- `modelos/matriz_confusao_<modelo>.png`, `curvas_pr_roc_<modelo>.png`
-- `modelos/melhor_modelo_<nome>.joblib`, `modelos/scaler.joblib`
-- `relatorios/comparacao_modelos.csv` e `.png`
-- `relatorios/shap_importancia_global.png`, `shap_transacao_individual.png`
-- `relatorios/relatorio_final.json` — resumo de tudo, para consumo por
-  outros sistemas/dashboards.
-
-## Usando o modelo treinado depois
+Saída: `prob_fraude`, `alerta` (0/1) e `faixa_risco` (baixo/médio/alto). As features
+por cartão precisam do histórico recente (`--history`, ao menos as últimas 24h).
 
 ```python
-import joblib
-import pandas as pd
-
-modelo = joblib.load("outputs/modelos/melhor_modelo_<NOME>.joblib")
-scaler = joblib.load("outputs/modelos/scaler.joblib")
-
-# novas_transacoes: DataFrame com as MESMAS colunas usadas no treino
-# (aplique src.feature_engineering.engineer_features antes de escalar)
-probabilidades = modelo.predict_proba(novas_transacoes)[:, 1]
+from src.inference import FraudDetector
+det = FraudDetector.load("outputs/modelos/modelo_fraude.joblib")
+resultado = det.score(df_novas, history=df_historico)
 ```
 
-## Notas importantes
+### API (opcional)
+```bash
+pip install -r requirements-api.txt
+uvicorn api:app --port 8000      # POST /score  |  GET /health
+```
 
-- O dataset sintético existe apenas para o projeto funcionar de ponta a
-  ponta sem depender de download externo. Ele imita a estrutura e o
-  desafio real (forte desbalanceamento, sobreposição parcial entre classes)
-  mas **não substitui dados reais** para uso em produção.
-- Para o dataset real do Kaggle ("Credit Card Fraud Detection"), baixe o
-  `creditcard.csv` e rode `python main.py --csv creditcard.csv`.
+## Arquivos gerados (`outputs/`)
+
+- `eda/` — estatísticas, balanceamento, correlação, fraude por hora/canal/categoria, ausentes.
+- `modelos/` — `modelo_fraude.joblib`, matrizes de confusão, PR/ROC (todos os modelos), análise de limiar, calibração, ganho/lift, curva de custo.
+- `relatorios/` — `relatorio.md` (resumo legível), `relatorio_final.json`, `comparacao_modelos.csv/.png`, `estrategias_limiar.csv`, `validacao_cruzada.csv`, `benchmark_balanceamento.csv`, `drift_psi_features.csv`, importância (SHAP ou permutação) e explicação de uma transação.
+
+## Usando dados reais
+
+O CSV precisa de `Class` (0/1). `Time` e `Amount` ativam features temporais, split
+temporal e análise de custo. Colunas opcionais que enriquecem o modelo:
+`id_cartao`, `categoria_comerciante`, `canal`, `distancia_casa_km` (ou equivalentes —
+renomeie ou ajuste `add_causal_features`). Qualquer outra coluna numérica entra como feature.
+
+## Limitações e próximos passos
+
+- Features por cartão exigem histórico no momento da inferência (use um feature store/cache em produção).
+- Sem calibração de probabilidade (isotônica/Platt) — o limiar escolhido na validação compensa, mas as probabilidades absolutas não são confiáveis com `class_weight`/SMOTE.
+- Ideias: ajuste de hiperparâmetros (Optuna), features de grafo (cartão–comerciante), aprendizado com custo por transação, retreino agendado acionado por PSI.
